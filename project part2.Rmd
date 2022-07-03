@@ -1,0 +1,438 @@
+---
+title: "Project Part 2"
+author: "Josh McCuen"
+date: '2022-07-01'
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(gridExtra)
+library(ggcorrplot)
+library(MASS)
+library(lmtest)
+library(glmnet)
+library(GGally)
+library(car)
+library(lubridate)
+library(splines)
+library(mice) 
+library(VIM) 
+library(naniar) 
+library(skimr) 
+library(UpSetR)
+library(mice) 
+library(ranger) 
+library(randomForest) 
+library(caret)
+library(gridExtra)
+library(vip)
+library(readr)
+library(e1071) 
+library(ROCR) 
+library(rpart) 
+library(rpart.plot) 
+library(RColorBrewer) 
+library(rattle) 
+student <- read_csv("ames_student.csv")
+View(student)
+options(tidyverse.quiet = TRUE)
+
+```
+
+###Variables Selected for Relevance and Importance
+
+```{r}
+ames2 = student %>% dplyr::select("Overall_Qual", "Gr_Liv_Area", "Garage_Cars", "Garage_Area", "Total_Bsmt_SF", "First_Flr_SF", "Full_Bath", "Year_Built", "Year_Remod_Add", "TotRms_AbvGrd", "Neighborhood", "Above_Median")
+```
+###Character Variables Converted to Factors
+```{r}
+ames2 = ames2 %>% mutate(Overall_Qual = as_factor(Overall_Qual))
+ames2 = ames2 %>% mutate(Neighborhood = as_factor(Neighborhood))
+ames2 = ames2 %>% mutate(Above_Median = as_factor(Above_Median))
+```
+
+###One Outlier Removed, This Home Is Over 2000sqft Larger Than The Next Largest Home
+```{r}
+ames2 = ames2 %>% filter(Gr_Liv_Area < 5000)
+```
+### Logistic Regression Modeling
+
+```{r}
+set.seed(123) 
+ames_split = initial_split(ames2, prob = 0.80, strata = Above_Median)
+train = training(ames_split)
+test = testing(ames_split)
+```
+###Graphing Above Median to Variables Selected for Testing
+```{r}
+ggplot(train,aes(x=Above_Median,y=Gr_Liv_Area)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Overall_Qual)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Garage_Cars)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Garage_Area)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Total_Bsmt_SF)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=First_Flr_SF)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Full_Bath)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Year_Built)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Year_Remod_Add)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=TotRms_AbvGrd)) + geom_boxplot()
+ggplot(train,aes(x=Above_Median,y=Neighborhood)) + geom_boxplot()
+
+```
+
+```{r}
+ames_model = 
+  logistic_reg(mode = "classification") %>% 
+  set_engine("glm") 
+
+ames_recipe = recipe(Above_Median ~., train)
+
+logreg_wf = workflow() %>%
+  add_recipe(ames_recipe) %>% 
+  add_model(ames_model)
+
+ames_fit = fit(logreg_wf, train)
+```
+
+```{r}
+options(scipen = 999)
+summary(ames_fit$fit$fit$fit)
+options(scipen = 0)
+```
+
+####Most Important Variables: General Living Area, Year Remodled/Additions, Homes of Average Quality
+
+```{r}
+set.seed(1234)
+ames_median = mice(ames2, m=5, method='pmm', printFlag=FALSE)
+summary(ames_median)
+
+ames_complete = complete(ames_median) 
+summary(ames_complete)
+```
+
+###Classification Trees Modeling
+
+```{r}
+set.seed(1234) 
+ames_split2 = initial_split(ames_complete, prop = 0.7, strata = Above_Median) 
+train2 = training(ames_split2) 
+test2 = testing(ames_split2)
+```
+
+```{r}
+ames_recipe2 = recipe(Above_Median ~., train2) %>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree() %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(ames_recipe2)
+
+ames_fit2 = fit(ames_wflow, train2)
+```
+
+```{r}
+tree = ames_fit2 %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree)
+
+fancyRpartPlot(tree, tweak=1.5)
+```
+#### Homes built after 1985 with a general living area over 1144 sqft most likely to sell above median
+
+
+
+```{r}
+ames_fit2$fit$fit$fit$cptable
+```
+```{r}
+set.seed(1234)
+folds = vfold_cv(train2, v = 5)
+```
+
+```{r}
+ames_recipe2 = recipe(Above_Median ~., train2) %>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid = grid_regular(cost_complexity(),
+                          levels = 25) 
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(ames_recipe2)
+
+tree_res = 
+  ames_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+    )
+
+tree_res
+```
+
+###Accuracy Testing
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+```
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+```{r}
+final_wf = 
+  ames_wflow %>% 
+  finalize_workflow(best_tree)
+```
+
+```{r}
+final_fit = fit(final_wf, train2)
+
+tree = final_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree, tweak = 1.2) 
+
+
+```
+Predictions on training set  
+```{r}
+treepred = predict(final_fit, train2, type = "class")
+head(treepred)
+```
+
+Caret confusion matrix and accuracy, etc. calcs  
+```{r}
+confusionMatrix(treepred$.pred_class,train2$Above_Median,positive="Yes") 
+```
+
+Predictions on testing set  
+```{r}
+treepred_test = predict(final_fit, test2, type = "class")
+head(treepred_test)
+```
+
+Caret confusion matrix and accuracy, etc. calcs  
+```{r}
+confusionMatrix(treepred_test$.pred_class,test2$Above_Median,positive="Yes") 
+```
+
+```{r}
+ames_recipe2 = recipe(Above_Median ~., train2) %>% 
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+tree_grid = expand.grid(cost_complexity = seq(0.001,0.01,by=0.001))
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(ames_recipe2)
+
+tree_res = 
+  ames_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+    )
+
+tree_res
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+```
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+
+```{r}
+final_wf = 
+  ames_wflow %>% 
+  finalize_workflow(best_tree)
+```
+
+```{r}
+final_fit = fit(final_wf, train2)
+
+tree = final_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree, tweak = 1.5) 
+
+```
+```{r}
+ames3 = ames2 %>% mutate(Above_Median = fct_recode(Above_Median, "No" = "0", "Yes" = "1"))
+```
+```{r}
+set.seed(1234) 
+ames_split3 = initial_split(ames3, prop = 0.7, strata = Above_Median)
+train3 = training(ames_split3)
+test3 = testing(ames_split3)
+```
+
+
+Set up our folds for cross-validation  
+```{r}
+set.seed(123)
+rf_folds = vfold_cv(train3, v = 5)
+```
+###Random Forest
+
+```{r}
+ames_recipe3 = recipe(Above_Median ~., train3) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 10) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification")
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(ames_recipe3)
+
+set.seed(1234)
+rf_res = tune_grid(
+  ames_wflow,
+  resamples = rf_folds,
+  grid = 20 
+)
+```
+
+
+Refining the parameters  
+```{r}
+ames_recipe3 = recipe(Above_Median ~., train3) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 150) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification")
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(ames_recipe3)
+
+rf_grid = grid_regular(
+   mtry(range = c(3, 8)),
+  min_n(range = c(9, 20)), 
+  levels = 5
+)
+
+set.seed(1234)
+rf_res_tuned = tune_grid(
+  ames_wflow,
+  resamples = rf_folds,
+  grid = rf_grid 
+)
+```
+
+
+
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+```{r}
+best_rf = select_best(rf_res_tuned, "accuracy")
+
+final_rf = finalize_workflow(
+  ames_wflow,
+  best_rf
+)
+
+final_rf
+```
+```{r}
+final_rf_fit = fit(final_rf, train3)
+```
+
+Check out variable importance
+```{r}
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+Predictions  
+```{r}
+trainpredrf = predict(final_rf_fit, train3)
+head(trainpredrf)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(trainpredrf$.pred_class, train3$Above_Median, 
+                positive = "Yes")
+```
+
+Predictions on test
+```{r}
+testpredrf = predict(final_rf_fit, test3)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, test3$Above_Median, 
+                positive = "Yes")
+```
+
+Save the model to a file to load later (if needed)  
+```{r}
+saveRDS(final_rf_fit, "final_rf_fit.rds")
+```
+
+Load the model  
+```{r}
+final_rf_fit = readRDS("final_rf_fit.rds")
+```
+
+
+
+
+
+
+
+
